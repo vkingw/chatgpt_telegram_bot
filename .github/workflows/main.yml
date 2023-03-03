@@ -1,11 +1,6 @@
 name: Publish Docker image
 
 on:
-  push:
-    branches:
-      - 'main'
-  release:
-    types: [published]
   workflow_dispatch:
   
 env:
@@ -18,7 +13,7 @@ jobs:
     
     steps:
       - name: Check out the repo
-        uses: actions/checkout@v2
+        uses: actions/checkout@main
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v2
       - name: Set up Docker Buildx

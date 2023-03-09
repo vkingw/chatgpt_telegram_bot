@@ -37,6 +37,12 @@ HELP_MESSAGE = """Commands:
 ⚪ /help – Show help
 """
 
+
+def split_text_into_chunks(text, chunk_size):
+    for i in range(0, len(text), chunk_size):
+        yield text[i:i + chunk_size]
+
+
 async def register_user_if_not_exists(update: Update, context: CallbackContext, user: User):
     if not db.check_if_user_exists(user.id):
         db.add_new_user(
@@ -98,12 +104,13 @@ async def message_handle(update: Update, context: CallbackContext, message=None,
         
     await register_user_if_not_exists(update, context, update.message.from_user)
     user_id = update.message.from_user.id
+    chat_mode = db.get_user_attribute(user_id, "current_chat_mode")
 
     # new dialog timeout
     if use_new_dialog_timeout:
         if (datetime.now() - db.get_user_attribute(user_id, "last_interaction")).seconds > config.new_dialog_timeout and len(db.get_dialog_messages(user_id)) > 0:
             db.start_new_dialog(user_id)
-            await update.message.reply_text("Starting new dialog due to timeout ✅")
+            await update.message.reply_text(f"Starting new dialog due to timeout (<b>{openai_utils.CHAT_MODES[chat_mode]['name']}</b> mode) ✅", parse_mode=ParseMode.HTML)
     db.set_user_attribute(user_id, "last_interaction", datetime.now())
 
     # send typing action
@@ -112,11 +119,14 @@ async def message_handle(update: Update, context: CallbackContext, message=None,
     try:
         message = message or update.message.text
 
+        dialog_messages = db.get_dialog_messages(user_id, dialog_id=None)
+        chat_mode = db.get_user_attribute(user_id, "current_chat_mode")
+
         chatgpt_instance = openai_utils.ChatGPT(use_chatgpt_api=config.use_chatgpt_api)
         answer, n_used_tokens, n_first_dialog_messages_removed = await chatgpt_instance.send_message(
             message,
-            dialog_messages=db.get_dialog_messages(user_id, dialog_id=None),
-            chat_mode=db.get_user_attribute(user_id, "current_chat_mode"),
+            dialog_messages=dialog_messages,
+            chat_mode=chat_mode
         )
 
         # update user data
@@ -143,11 +153,18 @@ async def message_handle(update: Update, context: CallbackContext, message=None,
             text = f"✍️ <i>Note:</i> Your current dialog is too long, so <b>{n_first_dialog_messages_removed} first messages</b> were removed from the context.\n Send /new command to start new dialog"
         await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
-    try:
-        await update.message.reply_text(answer, parse_mode=ParseMode.HTML)
-    except telegram.error.BadRequest:
-        # answer has invalid characters, so we send it without parse_mode
-        await update.message.reply_text(answer)
+    # split answer into multiple messages due to 4096 character limit
+    for answer_chunk in split_text_into_chunks(answer, 4000):
+        try:
+            parse_mode = {
+                "html": ParseMode.HTML,
+                "markdown": ParseMode.MARKDOWN
+            }[openai_utils.CHAT_MODES[chat_mode]["parse_mode"]]
+            
+            await update.message.reply_text(answer_chunk, parse_mode=parse_mode)
+        except telegram.error.BadRequest:
+            # answer has invalid characters, so we send it without parse_mode
+            await update.message.reply_text(answer_chunk)
 
 
 async def voice_message_handle(update: Update, context: CallbackContext):
@@ -263,7 +280,7 @@ async def error_handle(update: Update, context: CallbackContext) -> None:
     try:
         # collect error message
         tb_list = traceback.format_exception(None, context.error, context.error.__traceback__)
-        tb_string = "".join(tb_list)[:2000]
+        tb_string = "".join(tb_list)
         update_str = update.to_dict() if isinstance(update, Update) else str(update)
         message = (
             f"An exception was raised while handling an update\n"
@@ -273,10 +290,12 @@ async def error_handle(update: Update, context: CallbackContext) -> None:
         )
 
         # split text into multiple messages due to 4096 character limit
-        message_chunk_size = 4000
-        message_chunks = [message[i:i + message_chunk_size] for i in range(0, len(message), message_chunk_size)]
-        for message_chunk in message_chunks:
-            await context.bot.send_message(update.effective_chat.id, message_chunk, parse_mode=ParseMode.HTML)
+        for message_chunk in split_text_into_chunks(message, 4000):
+            try:
+                await context.bot.send_message(update.effective_chat.id, message_chunk, parse_mode=ParseMode.HTML)
+            except telegram.error.BadRequest:
+                # answer has invalid characters, so we send it without parse_mode
+                await context.bot.send_message(update.effective_chat.id, message_chunk)
     except:
         await context.bot.send_message(update.effective_chat.id, "Some error in error handler")
 
